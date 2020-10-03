@@ -10,66 +10,70 @@ class CommandBuilder
     /**
      * Build the command for the given event.
      *
+     * Possible conditions:
+     *  [1] windows - background
+     *  [2] windows - foreground
+     *  [3] not windows - background, with user
+     *  [4] not windows - background, without user
+     *  [5] not windows - foreground, with user
+     *  [6] not windows - foreground, without user
+     *
      * @param  \Illuminate\Console\Scheduling\Event  $event
      * @return string
      */
     public function buildCommand(Event $event)
     {
-        if ($event->runInBackground) {
-            return $this->buildBackgroundCommand($event);
+        $redirect = $event->shouldAppendOutput ? '>>' : '>';
+
+        $primaryCommand = sprintf(
+            '%s %s %s 2>&1',
+            escapeshellarg($event->command),
+            $redirect,
+            escapeshellarg($event->output)
+        );
+
+        // covering ALL foreground cases
+        if ($event->runInBackground === false) {
+            if (is_string($event->user) === true && windows_os() === false) {
+                // format command to run through sudo
+                $runAsUser = sprintf('sudo -u %s -- sh -c', escapeshellarg($event->user));
+
+                return sprintf('%s \'%s\'', $runAsUser, $primaryCommand);
+            }
+
+            return $primaryCommand;
         }
 
-        return $this->buildForegroundCommand($event);
-    }
-
-    /**
-     * Build the command for running the event in the foreground.
-     *
-     * @param  \Illuminate\Console\Scheduling\Event  $event
-     * @return string
-     */
-    protected function buildForegroundCommand(Event $event)
-    {
-        $output = ProcessUtils::escapeArgument($event->output);
-
-        return $this->ensureCorrectUser(
-            $event, $event->command.($event->shouldAppendOutput ? ' >> ' : ' > ').$output.' 2>&1'
+        $finished = sprintf(
+            '%s %s',
+            Application::formatCommandString('schedule:finish'),
+            escapeshellarg($event->mutexName())
         );
-    }
 
-    /**
-     * Build the command for running the event in the background.
-     *
-     * @param  \Illuminate\Console\Scheduling\Event  $event
-     * @return string
-     */
-    protected function buildBackgroundCommand(Event $event)
-    {
-        $output = ProcessUtils::escapeArgument($event->output);
-
-        $redirect = $event->shouldAppendOutput ? ' >> ' : ' > ';
-
-        $finished = Application::formatCommandString('schedule:finish').' "'.$event->mutexName().'"';
-
-        if (windows_os()) {
-            return 'start /b cmd /c "('.$event->command.' & '.$finished.' "%errorlevel%")'.$redirect.$output.' 2>&1"';
+        // covers case 1
+        if (windows_os() === true) {
+            return sprintf(
+                'start /b cmd /c "(%s & %s "%%errorlevel%%") %s %s 2>&1"',
+                escapeshellarg($event->command),
+                $finished,
+                $redirect,
+                escapeshellarg($event->output)
+            );
         }
 
-        return $this->ensureCorrectUser($event,
-            '('.$event->command.$redirect.$output.' 2>&1 ; '.$finished.' "$?") > '
-            .ProcessUtils::escapeArgument($event->getDefaultOutput()).' 2>&1 &'
+        $primaryCommand = sprintf(
+            '(%s; %s $?) > %s 2>&1 &',
+            $primaryCommand,
+            $finished,
+            escapeshellarg($event->getDefaultOutput())
         );
-    }
 
-    /**
-     * Finalize the event's command syntax with the correct user.
-     *
-     * @param  \Illuminate\Console\Scheduling\Event  $event
-     * @param  string  $command
-     * @return string
-     */
-    protected function ensureCorrectUser(Event $event, $command)
-    {
-        return $event->user && ! windows_os() ? 'sudo -u '.$event->user.' -- sh -c \''.$command.'\'' : $command;
+        if (is_string($event->user) === true) {
+            $runAsUser = sprintf('sudo -u %s -- sh -c', escapeshellarg($event->user));
+
+            return sprintf('%s \'%s\'', $runAsUser, $primaryCommand);
+        }
+
+        return $primaryCommand;
     }
 }
